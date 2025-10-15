@@ -1,9 +1,23 @@
-﻿__pycache__/
+﻿# Python cache & env
+__pycache__/
 *.pyc
 .venv/
 .env
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Local data & runtime
 data/
 tmp/
 .checkpoints/
-.vscode/
-.idea/
+logs/
+
+# Spark / cache
+*.crc
+*.eventlog
+
+# OS / misc
+.DS_Store
+Thumbs.db

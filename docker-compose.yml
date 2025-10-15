@@ -1,0 +1,113 @@
+services:
+  # 1) Kafka-compatible broker (Redpanda) — dev-friendly single binary
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      # "overprovisioned" lets it run happily on laptops; smp/memory caps keep it light
+      - redpanda start
+      - --overprovisioned         # relaxes resource checks
+      - --smp 1                   # 1 CPU core (ok for dev)
+      - --memory 1G               # limit memory use
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      # expose two listener names:
+      # - PLAINTEXT for other containers (service name: redpanda:9092)
+      # - OUTSIDE for your Windows host apps (localhost:19092)
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      # tell clients what address to dial for each listener
+      - --advertise-kafka-addr PLAINTEXT://redpanda:9092,OUTSIDE://host.docker.internal:19092
+    ports:
+      - "9092:9092"   # internal/plaintext (containers could also just use redpanda:9092)
+      - "9644:9644"   # admin API (used by rpk)
+      - "19092:19092"
+    volumes:
+      - ./data/redpanda:/var/lib/redpanda/data   # persist topics & offsets on your disk
+
+  # 2) Web UI for Kafka/Redpanda — see topics/messages, lag, etc.
+  redpanda-console:
+    image: redpandadata/console:latest
+    environment:
+      - KAFKA_BROKERS=redpanda:9092   # console connects via container network
+    ports:
+      - "8080:8080"                   # open http://localhost:8080
+    depends_on:
+      - redpanda
+
+  # 3) MinIO — your local S3 (Iceberg will store data/metadata files here)
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=minio123
+    ports:
+      - "9000:9000"   # S3 API endpoint → http://localhost:9000
+      - "9001:9001"   # Web console → http://localhost:9001
+    volumes:
+      - ./data/minio:/data   # persist S3 objects on your disk
+    
+  # 4) Iceberg REST Catalog — a tiny service that tracks tables/metadata
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:latest
+    environment:
+      # where the actual table data & metadata lives
+      - CATALOG_WAREHOUSE=s3a://lake/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3__ENDPOINT=http://minio:9000 # important: point to MinIO, not AWS
+      - CATALOG_S3__PATH__STYLE__ACCESS=true
+      # make REST catalog talk to MinIO as if it were AWS S3
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=minio123
+    ports:
+      - "8181:8181" # # REST API → http://localhost:8181/v1/config
+      - minio
+
+  # 5) Spark (master & worker mode) — will run your Structured Streaming jobs
+  # Spark master (official image)
+  spark-master:
+    image: apache/spark:3.5.2
+    command: ["/opt/spark/bin/spark-class","org.apache.spark.deploy.master.Master"]
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "7077:7077"    # master RPC
+      - "8081:8080"    # master UI on host:8081
+    volumes:
+      - ./jobs:/opt/spark/jobs
+      - ./data:/opt/spark/data
+    depends_on:
+      - redpanda
+      - minio
+      - iceberg-rest
+
+  # Single worker so Structured Streaming has executors
+  spark-worker:
+    image: apache/spark:3.5.2
+    command: ["/opt/spark/bin/spark-class","org.apache.spark.deploy.worker.Worker","spark://spark-master:7077"]
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    depends_on:
+      - spark-master
+    volumes:
+      - ./jobs:/opt/spark/jobs
+      - ./data:/opt/spark/data
+
+  # 6) n8n — low-code/LLM automation for alerts/summaries later
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=admin123
+      - N8N_HOST=oyster-helping-immensely.ngrok-free.app
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - WEBHOOK_TUNNEL_URL=https://oyster-helping-immensely.ngrok-free.app
+    ports:
+      - "5678:5678"   # http://localhost:5678
+    volumes:
+      - ./data/n8n:/home/node/.n8n   # persist your flows
+    restart: unless-stopped
